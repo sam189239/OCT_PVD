@@ -58,7 +58,13 @@ class CannyEdgeTransform:
         img_tensor = (img_edges_rgb)
 
         return img_tensor
-    
+
+
+class GaussianBlur:
+    def __call__(self, img):
+        img = np.array(img)
+        denoised_img = cv2.GaussianBlur(img, (5, 5), 0)
+        return transforms.functional.to_pil_image(denoised_img)
 
 ## Visualize images ##
 
@@ -109,9 +115,10 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
     if optimizer is None:
         optimizer = optim.Adam(model.parameters(), lr=lr)
     train_losses = []
+    train_accuracies = []
     val_losses = []
     val_accuracies = []
-
+    best_val_acc = 0
     total_start_time = time.time()
     for epoch in (range(num_epochs)):
         epoch_start_time = time.time()
@@ -144,7 +151,7 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
         epoch_loss = running_loss / len(train_loader)
         train_losses.append(epoch_loss)
         epoch_acc = correct_train / total_train
-        
+        train_accuracies.append(epoch_acc)
 
         # Validation phase
         model.eval()
@@ -176,7 +183,8 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
               f'Val Loss: {val_epoch_loss:.4f}, Val Accuracy: {val_epoch_acc:.2f}, '
               f'Epoch Time: {epoch_duration:.2f}s')
         
-        if len(val_losses)==1 or val_losses[-1] <= val_losses[-2]:
+        if len(val_accuracies)==1 or val_accuracies[-1] >= best_val_acc:
+            best_val_acc = val_accuracies[-1]
             torch.save(model.state_dict(), "models/"+model_name+".pth")
             print("Saving weights...")
             
@@ -195,6 +203,7 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
         plt.legend()
 
         plt.subplot(1, 2, 2)
+        plt.plot(epochs, train_accuracies, label='Train Accuracy')
         plt.plot(epochs, val_accuracies, label='Val Accuracy')
         plt.xlabel('Epochs')
         plt.ylabel('Accuracy')
