@@ -1,3 +1,5 @@
+## Imports ##
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,54 +19,43 @@ from collections import Counter
 from collections import defaultdict
 import random
 from torch.utils.data import Subset
+from sklearn.utils.class_weight import compute_class_weight
+
+
 
 ## Pre-processing ##
 
+class BilateralFilter:
+    def __call__(self, img):
+        img = np.array(img)
+        denoised_img = cv2.bilateralFilter(img, d=9, sigmaColor=75, sigmaSpace=75)
+        return transforms.functional.to_pil_image(denoised_img)
+    
 class CLAHETransform:
     def __call__(self, img):
-        # Convert the PIL image to a NumPy array
         img_np = np.array(img)  # Convert to NumPy array
-
-        # Convert to grayscale
         img_gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-
-        # Apply CLAHE
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         img_clahe = clahe.apply(img_gray)
-
-        # Convert back to 3-channel image (repeat gray channel across RGB channels)
         img_clahe_rgb = cv2.cvtColor(img_clahe, cv2.COLOR_GRAY2RGB)
-
-        # Convert back to a tensor for the model pipeline
         img_tensor = (img_clahe_rgb)
-
         return img_tensor
     
 class CannyEdgeTransform:
     def __call__(self, img):
-        # Convert the PIL image to a NumPy array
         img_np = np.array(img)
-
-        # Convert to grayscale
         img_gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-
-        # Apply Canny Edge Detection
         edges = cv2.Canny(img_gray, threshold1=100, threshold2=200)
-
-        # Convert back to 3-channel image (repeat edges across RGB channels)
         img_edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
-
-        # Convert back to a tensor
         img_tensor = (img_edges_rgb)
-
         return img_tensor
-
 
 class GaussianBlur:
     def __call__(self, img):
         img = np.array(img)
         denoised_img = cv2.GaussianBlur(img, (5, 5), 0)
         return transforms.functional.to_pil_image(denoised_img)
+
 
 ## Visualize images ##
 
@@ -109,6 +100,8 @@ def visualize_samples(dataset, classes, num_images_per_class=3):
     plt.show()
 
 
+## Model training ##
+
 def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
              device='cpu', criterion=nn.CrossEntropyLoss(), 
              optimizer=None, plot=True, lr=0.001):
@@ -129,20 +122,15 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
         total_train = 0
         for (inputs, labels) in tqdm((train_loader)):
             inputs, labels = inputs.to(device), labels.to(device)
-
             # Zero the parameter gradients
             optimizer.zero_grad()
-
             # Forward pass
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-
             # Backward pass and optimize
             loss.backward()
             optimizer.step()
-
             running_loss += loss.item() * inputs.size(0) ## ?
-
             # Calculate training accuracy
             _, predicted = torch.max(outputs, 1)
             total_train += labels.size(0)
@@ -152,7 +140,6 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
         train_losses.append(epoch_loss)
         epoch_acc = correct_train / total_train
         train_accuracies.append(epoch_acc)
-
         # Validation phase
         model.eval()
         val_loss = 0.0
@@ -165,12 +152,10 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
                 loss = criterion(outputs, labels)
 
                 val_loss += loss.item() * inputs.size(0)
-
                 # Calculate validation accuracy
                 _, predicted = torch.max(outputs, 1)
                 total_val += labels.size(0)
                 correct_val += (predicted == labels).sum().item()
-
         val_epoch_loss = val_loss / len(test_loader)
         val_losses.append(val_epoch_loss)
         val_epoch_acc = correct_val / total_val
@@ -187,10 +172,8 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
             best_val_acc = val_accuracies[-1]
             torch.save(model.state_dict(), "models/"+model_name+".pth")
             print("Saving weights...")
-            
     total_end_time = time.time()
     total_duration = total_end_time - total_start_time
-
     if plot:
         epochs = range(1, num_epochs + 1)
         plt.figure(figsize=(12, 5))
@@ -201,7 +184,6 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
         plt.ylabel('Loss')
         plt.title('Training and Validation Loss')
         plt.legend()
-
         plt.subplot(1, 2, 2)
         plt.plot(epochs, train_accuracies, label='Train Accuracy')
         plt.plot(epochs, val_accuracies, label='Val Accuracy')
@@ -209,27 +191,22 @@ def train_fn(model, train_loader, test_loader, model_name, num_epochs=5,
         plt.ylabel('Accuracy')
         plt.title('Validation Accuracy')
         plt.legend()
-
         plt.tight_layout()
         plt.show()
-
     print(f'Total Training Time: {total_duration:.2f}s')
-
     return model, train_losses, val_losses
 
 def eval_fn(model, val_loader, device='cpu', binary = False):
     model.eval()
     all_preds = []
     all_labels = []
-
     with torch.no_grad():
-        for inputs, labels in val_loader:
+        for inputs, labels in tqdm(val_loader):
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
             _, predicted = torch.max(outputs, 1)
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-
     accuracy = accuracy_score(all_labels, all_preds)
     print(f'Validation Accuracy: {accuracy:.4f}')
     if binary:
@@ -237,3 +214,28 @@ def eval_fn(model, val_loader, device='cpu', binary = False):
     else:
         print(f'Validation F1: {f1_score(all_labels, all_preds, average="macro"):.4f}')
     return accuracy
+
+
+## Models ##
+
+def resnet50_modelinit(device='cuda'):
+    resnet50 = models.resnet50(pretrained=True)
+
+    for param in resnet50.parameters():
+        param.requires_grad = False ## Try again with true !!
+
+    num_ftrs = resnet50.fc.in_features
+    resnet50.fc = nn.Sequential(
+        nn.Linear(num_ftrs, 1024),
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(1024, 256),
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(256, 4) 
+    )
+
+    resnet50 = resnet50.to(device)
+    optimizer = optim.Adam(resnet50.fc.parameters(), lr=0.001)
+
+    return resnet50, optimizer
